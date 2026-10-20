@@ -392,6 +392,10 @@ function compactDraftHistoryEntry(item) {
     categoryIds: Array.isArray(item.categoryIds) ? item.categoryIds.map((id) => Number(id)).filter((id) => id > 0) : [],
     createdAt: item.createdAt || new Date().toISOString(),
     rotationCategoryKey: item.rotationCategoryKey || "",
+    mappedParentCategory: item.mappedParentCategory || "",
+    mappedChildCategory: item.mappedChildCategory || "",
+    postCategoriesVerified: item.postCategoriesVerified === true,
+    verifiedCategoryIds: Array.isArray(item.verifiedCategoryIds) ? item.verifiedCategoryIds : [],
   };
 }
 
@@ -915,6 +919,51 @@ function categoryIdsForPayload(selectedCategory) {
   if (categoryId > 0 && !ids.includes(categoryId)) ids.push(categoryId);
 
   return ids;
+}
+
+function assertMappedCategoryPair(categories, titleEntry, selectedCategory) {
+  if (!titleEntryHasCategory(titleEntry)) return;
+  const parent = categories.find((category) => Number(category.id) === Number(selectedCategory?.parentId));
+  const child = categories.find((category) => Number(category.id) === Number(selectedCategory?.id));
+  if (!parent || !child || Number(parent.parent || 0) !== 0 || Number(child.parent) !== Number(parent.id)
+    || comparableCategoryName(parent.name) !== comparableCategoryName(titleEntry.parentCategory)
+    || comparableCategoryName(child.name) !== comparableCategoryName(titleEntry.childCategory)) {
+    throw new Error("제목 파일의 상위·세부 카테고리 쌍을 정확히 연결하지 못했습니다. 임시글을 만들지 않습니다.");
+  }
+}
+
+async function verifyDraftCategories({siteUrl, username, appPassword, postId, selectedCategory}) {
+  const expected = categoryIdsForPayload(selectedCategory);
+  if (expected.length === 0) return null;
+  const url = `${wordpressBaseUrl(siteUrl)}/wp-json/wp/v2/posts/${postId}?context=edit`;
+  const headers = {Authorization: `Basic ${wordpressCredentials(username, appPassword)}`, Accept: "application/json"};
+  async function request(method, payload) {
+    const response = await wpFetch(url, {
+      method,
+      headers: {...headers, ...(payload ? {"Content-Type": "application/json"} : {})},
+      ...(payload ? {body: JSON.stringify(payload)} : {}),
+    });
+    let data;
+    try { data = JSON.parse(await response.text()); } catch {
+      throw new Error(`임시글 ID ${postId}: 카테고리 재조회 응답을 해석하지 못했습니다. 저장된 글을 확인해 주세요.`);
+    }
+    if (!response.ok || Number(data.id) !== Number(postId)) {
+      throw new Error(`임시글 ID ${postId}: 카테고리 재확인에 실패했습니다. 저장된 글을 확인해 주세요.`);
+    }
+    return data;
+  }
+  const matches = (post) => Array.isArray(post.categories)
+    && expected.every((id) => post.categories.map(Number).includes(id));
+  let post = await request("GET");
+  if (!matches(post)) {
+    // 생성 응답 대신 실제 저장 상태를 확인하고, 누락된 경우 같은 글만 한 번 보정한다.
+    await request("POST", {categories: [...new Set([...(post.categories || []).map(Number), ...expected])]});
+    post = await request("GET");
+  }
+  if (!matches(post)) {
+    throw new Error(`임시글 ID ${postId}: 상위·세부 카테고리가 실제로 저장되지 않았습니다. 저장된 글을 확인해 주세요.`);
+  }
+  return post.categories.map(Number);
 }
 
 function selectMappedCategory(categories, titleEntry) {
@@ -1851,6 +1900,7 @@ for (let index = 0; index < titles.length; index += 1) {
     } else {
       selectedCategory = selectBestCategory(wordpressCategories, {title, meta});
     }
+    assertMappedCategoryPair(wordpressCategories, titleEntry, selectedCategory);
     단계(index + 1, titles.length, "그림 만드는 중 (20~40초)");
     const generatedImage = await generateFeaturedImage({apiKey: env.OPENAI_API_KEY, title, meta, usdKrw});
     단계(index + 1, titles.length, "워드프레스에 올리는 중");
@@ -1872,6 +1922,7 @@ for (let index = 0; index < titles.length; index += 1) {
     if (!postHasInlineImage(post, featuredMedia)) {
       throw new Error("워드프레스 임시글 본문에 이미지 블록이 저장되지 않았습니다.");
     }
+    const verifiedCategoryIds = await verifyDraftCategories({siteUrl, username, appPassword, postId: post.id, selectedCategory});
 
     // 랭크매스 포커스 키워드. 없는 사이트면 조용히 건너뛰되, 화면에는 왜 안 됐는지 남긴다.
     // (조용히 넘어가면 "됐다고 나오는데 실제로는 비어 있는" 사고가 난다)
@@ -1904,6 +1955,8 @@ for (let index = 0; index < titles.length; index += 1) {
       inlineImageCaption: featuredMedia.caption,
       mappedParentCategory: titleEntry.parentCategory || "",
       mappedChildCategory: titleEntry.childCategory || "",
+      postCategoriesVerified: verifiedCategoryIds !== null,
+      verifiedCategoryIds: verifiedCategoryIds || [],
       mappedChildCategoryDescription: titleEntry.childCategoryDescription || "",
       categoryId: selectedCategory?.id || 0,
       parentCategoryId: selectedCategory?.parentId || 0,

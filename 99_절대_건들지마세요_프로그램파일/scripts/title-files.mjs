@@ -187,7 +187,7 @@ function isNumberedTitleLine(line) {
 function isIgnoredLine(line) {
   const value = line.replace(/^\uFEFF/, "").trim();
   if (!value || value.startsWith("#")) return true;
-  if (/^_{5,}$/.test(value)) return true;
+  if (/^(?:_{5,}|={5,}|-{5,})$/.test(value)) return true;
   if (/^\[\d+\s*\/\s*\d+\]\s*카테고리/.test(value)) return true;
   if (/^카테고리\s*\d+\s*:/.test(value)) return true;
   if (/^카테고리\s*구성$/.test(value)) return true;
@@ -276,7 +276,9 @@ export function parseStructuredTitleCatalog(text) {
     currentParent = null;
   }
 
-  const rawLines = String(text || "").split(/\r?\n/);
+  // 내보낸 제목 파일의 작성 가이드는 제목·카테고리 데이터가 아니다.
+  const catalogText = String(text || "").split(/^\s*\[전체 제목 데이터 끝\]\s*$/m)[0];
+  const rawLines = catalogText.split(/\r?\n/);
   rawLines.forEach((rawLine, index) => {
     const line = rawLine.replace(/^\uFEFF/, "").trim();
     const lineNumber = index + 1;
@@ -439,7 +441,8 @@ export function readTitleEntries(filePath) {
     const firstCategoryAt = text.search(/^\s*(?:\*\*\s*)?(?:\[\d+\s*\/\s*\d+\]\s*)?카테고리\s*\d+\s*:/m);
     if (firstCategoryAt > 0) {
       const head = text.slice(0, firstCategoryAt);
-      const loose = extractTitlesFromText(head).map((title) => ({
+      const isExportHeader = /^\s*\[기본 정보\]\s*$/m.test(head);
+      const loose = (isExportHeader ? [] : extractTitlesFromText(head)).map((title) => ({
         title,
         parentCategoryNumber: 0,
         parentCategory: "",
