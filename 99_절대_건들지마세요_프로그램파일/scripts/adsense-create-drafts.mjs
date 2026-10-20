@@ -392,6 +392,8 @@ function compactDraftHistoryEntry(item) {
     categoryIds: Array.isArray(item.categoryIds) ? item.categoryIds.map((id) => Number(id)).filter((id) => id > 0) : [],
     createdAt: item.createdAt || new Date().toISOString(),
     rotationCategoryKey: item.rotationCategoryKey || "",
+    imageCount: Number(item.imageCount || 0),
+    inlineImageMediaIds: Array.isArray(item.inlineImageMediaIds) ? item.inlineImageMediaIds : [],
     mappedParentCategory: item.mappedParentCategory || "",
     mappedChildCategory: item.mappedChildCategory || "",
     postCategoriesVerified: item.postCategoriesVerified === true,
@@ -1393,16 +1395,20 @@ function buildArticleImageBlock({media}) {
   ].join("\n");
 }
 
-function insertImageBlockIntoArticle(html, imageBlock) {
+function insertImageBlockIntoArticle(html, imageBlocks) {
+  const images = Array.isArray(imageBlocks) ? imageBlocks : [imageBlocks];
   const blocks = String(html || "")
     .trim()
     .split(/\n{2,}/)
     .map((block) => block.trim())
     .filter(Boolean);
 
-  if (blocks.length === 0) return imageBlock;
-  const insertIndex = blocks.length <= 4 ? Math.min(2, blocks.length) : Math.min(Math.max(3, Math.floor(blocks.length / 2)), blocks.length - 1);
-  blocks.splice(insertIndex, 0, imageBlock);
+  const originalLength = blocks.length;
+  // 뒤에서부터 삽입해 본문의 원래 위치를 유지한다.
+  for (let i = images.length - 1; i >= 0; i -= 1) {
+    const position = Math.floor(originalLength * (i + 1) / (images.length + 1));
+    blocks.splice(position, 0, images[i]);
+  }
   return blocks.join("\n\n").trim();
 }
 
@@ -1428,7 +1434,10 @@ function postContentText(post) {
 
 function postHasInlineImage(post, media) {
   const content = postContentText(post);
-  return content.includes(`wp-image-${media.id}`) || content.includes(`"id":${media.id}`);
+  const id = Number(media.id);
+  if (!Number.isInteger(id) || id <= 0) return false;
+  return new RegExp(`wp-image-${id}(?![0-9])`).test(content)
+    || new RegExp(`"id"\\s*:\\s*${id}(?=\\s*[,}])`).test(content);
 }
 
 async function generateArticle({apiKey, model, title, minChars, 키워드 = ""}) {
@@ -1901,13 +1910,31 @@ for (let index = 0; index < titles.length; index += 1) {
       selectedCategory = selectBestCategory(wordpressCategories, {title, meta});
     }
     assertMappedCategoryPair(wordpressCategories, titleEntry, selectedCategory);
-    단계(index + 1, titles.length, "그림 만드는 중 (20~40초)");
-    const generatedImage = await generateFeaturedImage({apiKey: env.OPENAI_API_KEY, title, meta, usdKrw});
-    단계(index + 1, titles.length, "워드프레스에 올리는 중");
-    const featuredMedia = await uploadFeaturedImage({siteUrl, username, appPassword, title, meta, generatedImage});
-    const htmlWithImage = insertImageBlockIntoArticle(html, buildArticleImageBlock({media: featuredMedia}));
+    const generatedImages = [];
+    const articleMedia = [];
+    const compositions = ["Wide establishing scene", "Close-up detail with a different viewpoint", "Everyday application scene with a different composition"];
+    for (let imageIndex = 0; imageIndex < 3; imageIndex += 1) {
+      단계(index + 1, titles.length, "그림 만드는 중 (20~40초)");
+      const imageMeta = {
+        ...meta,
+        slug: `${meta.slug}-image-${imageIndex + 1}`,
+        imageScene: `${meta.imageScene || meta.slug.replace(/-/g, " ")}. ${compositions[imageIndex]}.`,
+        featuredImageAlt: `${meta.featuredImageAlt} (${imageIndex + 1})`,
+      };
+      const image = await generateFeaturedImage({apiKey: env.OPENAI_API_KEY, title, meta: imageMeta, usdKrw});
+      generatedImages.push(image);
+      단계(index + 1, titles.length, "워드프레스에 올리는 중");
+      articleMedia.push(await uploadFeaturedImage({siteUrl, username, appPassword, title, meta: imageMeta, generatedImage: image}));
+    }
+    const featuredMedia = articleMedia[0];
+    const generatedImage = {
+      ...generatedImages[0],
+      estimatedUsd: generatedImages.reduce((sum, image) => sum + image.estimatedUsd, 0),
+      estimatedKrw: generatedImages.reduce((sum, image) => sum + image.estimatedKrw, 0),
+    };
+    const htmlWithImage = insertImageBlockIntoArticle(html, articleMedia.map((media) => buildArticleImageBlock({media})));
     validateArticleHtml(htmlWithImage, title);
-    validateInlineImageBlock(htmlWithImage, featuredMedia);
+    for (const media of articleMedia) validateInlineImageBlock(htmlWithImage, media);
     const localPath = join(outputDir, `${String(index + 1).padStart(3, "0")}_${safeFilename(title)}.html`);
     const visiblePath = join(visibleOutputDir, `${String(index + 1).padStart(3, "0")}_${safeFilename(title)}.html`);
     writeFileSync(localPath, htmlWithImage, "utf8");
@@ -1916,11 +1943,11 @@ for (let index = 0; index < titles.length; index += 1) {
     const postDate = postDateForIndex(index + dateOffset, dateMode, startDate, {randomDays, fixedTime, stepDays, hourGap, perDay, minGapHours, 피할시각들: 잡힌시각들});
     if (postDate) 잡힌시각들.push(Date.parse(postDate)); // 이번 실행에서 잡은 시각도 다음 글이 피하게
     let post = await createDraftPost({siteUrl, username, appPassword, title, html: htmlWithImage, date: postDate, meta, featuredMediaId: featuredMedia.id, selectedCategory});
-    if (!postHasInlineImage(post, featuredMedia)) {
+    if (!articleMedia.every((media) => postHasInlineImage(post, media))) {
       post = await updateDraftPostContent({siteUrl, username, appPassword, postId: post.id, html: htmlWithImage, featuredMediaId: featuredMedia.id, selectedCategory});
     }
-    if (!postHasInlineImage(post, featuredMedia)) {
-      throw new Error("워드프레스 임시글 본문에 이미지 블록이 저장되지 않았습니다.");
+    if (!articleMedia.every((media) => postHasInlineImage(post, media))) {
+      throw new Error("워드프레스 임시글 본문에 이미지 3개가 모두 저장되지 않았습니다.");
     }
     const verifiedCategoryIds = await verifyDraftCategories({siteUrl, username, appPassword, postId: post.id, selectedCategory});
 
@@ -1948,6 +1975,9 @@ for (let index = 0; index < titles.length; index += 1) {
       featuredImageAlt: meta.featuredImageAlt,
       featuredMediaId: featuredMedia.id,
       featuredImageUrl: featuredMedia.sourceUrl,
+      imageCount: articleMedia.length,
+      inlineImageMediaIds: articleMedia.map((media) => media.id),
+      inlineImageUrls: articleMedia.map((media) => media.sourceUrl),
       inlineImageInserted: true,
       inlineImageMediaId: featuredMedia.id,
       postContentImageVerified: true,
