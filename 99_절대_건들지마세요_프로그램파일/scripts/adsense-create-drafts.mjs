@@ -1131,7 +1131,7 @@ async function generatePostMeta({apiKey, model, title, 고정키워드 = ""}) {
     "slug는 한국어 로마자 표기가 아니라 의미 번역이어야 하며, 3~6개 영어 단어와 하이픈만 사용한다.",
     "focusKeyword는 제목에서 가장 중요한 한국어 대표키워드 1개 또는 짧은 키워드구여야 한다.",
     "categoryHint는 글을 넣을 워드프레스 카테고리를 고르기 위한 한국어 주제 힌트여야 한다.",
-    "imageScenes는 이 글에 넣을 이미지 3개의 영어 장면 설명 배열이다. 세 장의 주요 사물, 장소, 행동을 모두 다르게 설계한다. 같은 책상·책·인물을 시점만 바꿔 반복하지 않는다. 1번은 주제를 보여 주는 사람이나 상황으로, 사람은 뒷모습·실루엣으로 표현해도 된다. 2번은 사람이 없는 사물 중심으로, 3번은 2번과 다른 사물이나 관련 개념 이미지로 설계한다. 2·3번에는 사람을 넣지 않는다. 사진뿐 아니라 일러스트·글자 없는 개념 그림도 허용한다. 각 설명은 글의 주제와 관련되어야 하며 글자와 실제 인물 얼굴을 포함하지 않는다.",
+    "imageScenes는 이 글에 넣을 이미지 3개의 영어 장면 설명 배열이다. 세 장의 주요 소재·장소·활동을 다르게 설계한다. 사람·사물·공간·과정·관련 개념 중 글에 맞는 조합과 순서를 자유롭게 선택하며, 특정 순서나 사람의 등장을 강제하지 않는다. 사람 중심 장면은 최대 한 장만 사용한다. 같은 책상·책·인물을 시점만 바꿔 반복하지 않는다. 사진과 일러스트·글자 없는 개념 그림 모두 허용한다. 모든 설명은 글의 주제와 관련되어야 하며 글자와 실제 인물 얼굴을 포함하지 않는다.",
     "imageScene은 대표이미지로 그릴 장면을 영어로 1~2문장 묘사한 것이어야 한다. 사물·상황·분위기만 쓰고, 글자·간판·문서·화면·책 등 읽을 수 있는 텍스트가 나올 만한 장면은 피한다. 사람 얼굴은 넣지 않는다.",
   ].join("\n");
 
@@ -1147,7 +1147,7 @@ async function generatePostMeta({apiKey, model, title, 고정키워드 = ""}) {
     '  "featuredImageAlt": "대표키워드를 자연스럽게 1회 포함한 대표이미지 대체 텍스트 한국어 1문장",',
     '  "featuredImageCaption": "대표이미지 캡션 한국어 1문장",',
     '  "imageScene": "English description of a text-free scene for the featured image, 1-2 sentences",',
-    '  "imageScenes": ["Person or situation illustrating the topic", "Relevant object without people", "Different object or related conceptual illustration without people"]',
+    '  "imageScenes": ["First distinct scene relevant to the topic", "Second scene with a different main subject", "Third scene with another subject or related concept"]',
     "}",
   ].join("\n");
 
@@ -1231,21 +1231,20 @@ function buildArticleImagePlans(meta) {
   const topic = String(meta.slug || "").replace(/-/g, " ").trim();
   const proposed = Array.isArray(meta.imageScenes) ? meta.imageScenes : [];
   const unique = new Set(proposed.map((scene) => normalizeSpaces(scene).toLowerCase()));
-  const scenes = proposed.length === 3 && unique.size === 3 ? proposed : [
-    `A person seen from behind in a situation illustrating ${topic}, as an editorial illustration`,
-    `A relevant object illustrating ${topic}, without people, in a simple still life`,
-    `A text-free conceptual illustration related to ${topic}, using a different object from the second image, without people`,
+  const fallback = [
+    `A topic-relevant object illustrating ${topic}, without people`,
+    `An environment related to ${topic}, without people or the object from the other scene`,
+    `A text-free conceptual illustration explaining a different aspect of ${topic}, without people`,
   ];
-  const roles = [
-    "PERSON OR SITUATION: a person may appear, seen from behind, as a silhouette, or as an anonymous illustrated figure. Illustrate the topic with a situation distinct from the other images.",
-    "OBJECT: focus on a topic-relevant object, no people or human figures. Use a different main subject from image 1; do not recreate its setting or merely remove its person.",
-    "DIFFERENT OBJECT OR CONCEPT: show another relevant object or a text-free conceptual illustration. No people or human figures. The main object must differ from image 2 and must not repeat the main subject of image 1. Do not repeat a desk-and-books scene.",
-  ];
+  // 대체 계획에도 고정된 소재 순서를 두지 않는다. 주제에 따라 시작점을 바꾼다.
+  const offset = [...topic].reduce((sum, character) => sum + character.codePointAt(0), 0) % fallback.length;
+  const scenes = proposed.length === 3 && unique.size === 3 ? proposed
+    : [...fallback.slice(offset), ...fallback.slice(0, offset)];
   return scenes.map((scene, index) => ({
     ...meta,
     slug: `${meta.slug}-image-${index + 1}`,
     imageScene: scene,
-    imageDiversity: `${roles[index]} Other planned scenes, for avoidance only: ${scenes.filter((_, i) => i !== index).join(" | ")}. Changing only the camera angle is not sufficient; vary subject, setting, and activity.`,
+    imageDiversity: `Choose the subject and medium appropriate to this scene; there is no fixed person/object/concept order. Across the three images, use different main subjects, settings, and activities. People are optional and may be the main subject in at most one image; if another planned scene focuses on people, use a non-human subject here. Do not repeat the same desk, books, or person. Other planned scenes, for avoidance only: ${scenes.filter((_, i) => i !== index).join(" | ")}. Changing only the camera angle is not sufficient; vary subject, setting, and activity.`,
     featuredImageAlt: `${meta.featuredImageAlt} (${index + 1})`,
   }));
 }
