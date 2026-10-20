@@ -728,6 +728,9 @@ function ensureMetaDefaults(meta, title) {
     featuredImageAlt,
     featuredImageCaption,
     imageScene,
+    imageScenes: Array.isArray(meta?.imageScenes) ? meta.imageScenes
+      .filter((scene) => typeof scene === "string" && !/[\u3131-\uD79D]/.test(scene))
+      .map((scene) => normalizeSpaces(scene).slice(0, 600)).filter(Boolean).slice(0, 3) : [],
   };
 }
 
@@ -1128,6 +1131,7 @@ async function generatePostMeta({apiKey, model, title, 고정키워드 = ""}) {
     "slug는 한국어 로마자 표기가 아니라 의미 번역이어야 하며, 3~6개 영어 단어와 하이픈만 사용한다.",
     "focusKeyword는 제목에서 가장 중요한 한국어 대표키워드 1개 또는 짧은 키워드구여야 한다.",
     "categoryHint는 글을 넣을 워드프레스 카테고리를 고르기 위한 한국어 주제 힌트여야 한다.",
+    "imageScenes는 이 글에 넣을 이미지 3개의 영어 장면 설명 배열이다. 세 장의 주요 사물, 장소, 행동을 모두 다르게 설계한다. 같은 책상·책·인물을 시점만 바꿔 반복하지 않는다. 1번은 사물 중심, 2번은 사람이 없는 공간·환경 중심, 3번은 다른 소재의 과정·활동 중심이다. 각 설명은 글의 주제와 관련되어야 하며 글자와 얼굴을 포함하지 않는다.",
     "imageScene은 대표이미지로 그릴 장면을 영어로 1~2문장 묘사한 것이어야 한다. 사물·상황·분위기만 쓰고, 글자·간판·문서·화면·책 등 읽을 수 있는 텍스트가 나올 만한 장면은 피한다. 사람 얼굴은 넣지 않는다.",
   ].join("\n");
 
@@ -1142,7 +1146,8 @@ async function generatePostMeta({apiKey, model, title, 고정키워드 = ""}) {
     '  "categoryHint": "카테고리 선택용 한국어 주제 힌트",',
     '  "featuredImageAlt": "대표키워드를 자연스럽게 1회 포함한 대표이미지 대체 텍스트 한국어 1문장",',
     '  "featuredImageCaption": "대표이미지 캡션 한국어 1문장",',
-    '  "imageScene": "English description of a text-free scene for the featured image, 1-2 sentences"',
+    '  "imageScene": "English description of a text-free scene for the featured image, 1-2 sentences",',
+    '  "imageScenes": ["Object-focused scene", "Different environment-focused scene without people", "Different process or activity scene"]',
     "}",
   ].join("\n");
 
@@ -1222,6 +1227,29 @@ function estimateImageCostUsd({model, quality, size}) {
   return table[model]?.[quality]?.[size] || 0;
 }
 
+function buildArticleImagePlans(meta) {
+  const topic = String(meta.slug || "").replace(/-/g, " ").trim();
+  const proposed = Array.isArray(meta.imageScenes) ? meta.imageScenes : [];
+  const unique = new Set(proposed.map((scene) => normalizeSpaces(scene).toLowerCase()));
+  const scenes = proposed.length === 3 && unique.size === 3 ? proposed : [
+    `A text-free still life of one relevant object illustrating ${topic}`,
+    `A real-world environment relevant to ${topic}, without people`,
+    `A practical process related to ${topic}, using a different subject and location`,
+  ];
+  const roles = [
+    "OBJECT: focus on a topic-relevant object, no people. Do not reuse the setting or main objects of the other two scenes.",
+    "ENVIRONMENT: show a different space or outdoor setting, no people, books, desks, or close-up still life. Do not repeat the main objects from the other scenes.",
+    "PROCESS: show a distinct action or physical process with different objects and a different setting. No desks, books, portraits, or visible faces. Do not recreate either of the other scenes.",
+  ];
+  return scenes.map((scene, index) => ({
+    ...meta,
+    slug: `${meta.slug}-image-${index + 1}`,
+    imageScene: scene,
+    imageDiversity: `${roles[index]} Other planned scenes, for avoidance only: ${scenes.filter((_, i) => i !== index).join(" | ")}. Changing only the camera angle is not sufficient; vary subject, setting, and activity.`,
+    featuredImageAlt: `${meta.featuredImageAlt} (${index + 1})`,
+  }));
+}
+
 function buildImagePrompt({title, meta}) {
   // 2026-09-21 진현님 지시: 대표이미지·본문 이미지에 어떤 언어의 글자도 넣지 않는다.
   // 그래서 한글 제목·키워드는 프롬프트에 아예 넣지 않는다 (한글이 있으면 모델이 그 글자를 그려 넣는다). 장면은 영어 묘사(imageScene)만 쓴다.
@@ -1230,6 +1258,7 @@ function buildImagePrompt({title, meta}) {
   return [
     "Create one original editorial thumbnail image for a blog article.",
     `Scene: ${scene}`,
+    meta.imageDiversity || "",
     "Style: clean, trustworthy, calm educational mood, realistic lighting, simple uncluttered background, one strong focal point.",
     "Composition: landscape 3:2 featured image, main subject centered, clean margins on all sides, clearly readable as a small thumbnail.",
     "STRICT RULE - NO TEXT AT ALL: the image must contain absolutely no text of any kind in any language or script. No Korean, no English, no numbers, no letters, no words, no signs, no labels, no captions, no subtitles, no watermarks, no logos, no UI text, no writing on paper, screens, boards, packaging, clothing or walls. If the scene would naturally include a sign, screen, document, book or label, render it blank, blurred or turned away so that nothing readable appears anywhere.",
@@ -1912,15 +1941,10 @@ for (let index = 0; index < titles.length; index += 1) {
     assertMappedCategoryPair(wordpressCategories, titleEntry, selectedCategory);
     const generatedImages = [];
     const articleMedia = [];
-    const compositions = ["Wide establishing scene", "Close-up detail with a different viewpoint", "Everyday application scene with a different composition"];
+    const imagePlans = buildArticleImagePlans(meta);
     for (let imageIndex = 0; imageIndex < 3; imageIndex += 1) {
       단계(index + 1, titles.length, "그림 만드는 중 (20~40초)");
-      const imageMeta = {
-        ...meta,
-        slug: `${meta.slug}-image-${imageIndex + 1}`,
-        imageScene: `${meta.imageScene || meta.slug.replace(/-/g, " ")}. ${compositions[imageIndex]}.`,
-        featuredImageAlt: `${meta.featuredImageAlt} (${imageIndex + 1})`,
-      };
+      const imageMeta = imagePlans[imageIndex];
       const image = await generateFeaturedImage({apiKey: env.OPENAI_API_KEY, title, meta: imageMeta, usdKrw});
       generatedImages.push(image);
       단계(index + 1, titles.length, "워드프레스에 올리는 중");
