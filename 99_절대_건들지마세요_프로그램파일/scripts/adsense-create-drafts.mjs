@@ -471,7 +471,7 @@ function applyTimeOfDay(date, fixedTime) {
 //
 // 2026-09-21 실측: 기본이 '지금 시각' 이라 3개가 00:13·00:14·00:14 로 붙어 나왔다 (진현님: "따닥따닥").
 // 슬롯 = 08:00(KST) + k × (최소간격+1)시간 + 0~60분 무작위 → 이웃 글 사이가 항상 최소간격 이상 벌어진다.
-// 오늘 이미 지나간 슬롯은 건너뛴다(지금+10분보다 앞이면 예약이 안 걸림). 날짜는 KST 기준.
+// 시작일을 생략한 경우에만 오늘 이미 지나간 슬롯을 건너뛴다. 지정한 시작일은 과거여도 유지한다. 날짜는 KST 기준.
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 function spreadDate(index, {perDay = 3, minGapHours = 3, startDate = null, 피할시각들 = []} = {}) {
   const per = Math.max(1, Math.floor(perDay));
@@ -482,9 +482,11 @@ function spreadDate(index, {perDay = 3, minGapHours = 3, startDate = null, 피�
   const kstNow = new Date((startDate ? startDate.getTime() : now) + KST_OFFSET_MS);
   const dayStartUtc = Date.UTC(kstNow.getUTCFullYear(), kstNow.getUTCMonth(), kstNow.getUTCDate()) - KST_OFFSET_MS;
   const slotStart = (day, k) => dayStartUtc + day * 24 * 60 * 60 * 1000 + 8 * 60 * 60 * 1000 + k * gapMs;
-  // 오늘 이미 지난 슬롯 수만큼 앞으로 민다 (startDate 를 미래로 준 경우엔 0)
+  // 시작일을 직접 지정했다면 그날 첫 슬롯부터 배정한다.
   let skipped = 0;
-  for (let k = 0; k < per; k += 1) if (slotStart(0, k) < 최소) skipped += 1;
+  if (!startDate) {
+    for (let k = 0; k < per; k += 1) if (slotStart(0, k) < 최소) skipped += 1;
+  }
   // 워드프레스에 이미 잡혀 있는 시각(예약·임시글)과 최소 간격 안에 드는 슬롯은 건너뛴다.
   // 그래서 수강생 폴더 기록이 없어도, 글을 1개씩 따로 만들어도 하루 3개·3시간 간격이 지켜진다 (2026-09-21 실측: 10개가 전부 12시대에 몰림).
   const 간격ms = Math.max(1, minGapHours) * 60 * 60 * 1000;
@@ -507,7 +509,7 @@ function postDateForIndex(index, mode, startDate, {randomDays = 30, fixedTime = 
   // 날짜를 아예 보내지 않으면 워드프레스가 지금 시각으로 저장한다 (--date-mode=now 로만).
   if (mode === "now" || mode === "none") return null;
   // 기본값: 하루 3개, 최소 3시간 간격, 시각 무작위, 이미 잡힌 시각은 피함
-  if (mode === "spread") return spreadDate(index, {perDay, minGapHours, startDate: startDate && startDate.getTime() > Date.now() ? startDate : null, 피할시각들});
+  if (mode === "spread") return spreadDate(index, {perDay, minGapHours, startDate, 피할시각들});
 
   // 시간 간격 모드 — 글마다 N시간씩 미룬다.
   //
@@ -1735,7 +1737,7 @@ const hourGap = Math.max(0, Number(argValue("hour-gap", "0")) || 0);
 // 앱 판은 글을 1개씩 따로 부른다. 그러면 index 가 매번 0 이라 "하루에 1개씩" 이 전부 같은 날이 된다.
 // 그래서 지금까지 만든 개수를 --date-offset 으로 받아 날짜 순번을 이어 간다. 코드스페이스 판은 0.
 const dateOffset = Math.max(0, Number(argValue("date-offset", "0")) || 0);
-const startDate = parseDate(argValue("start-date", "")) || defaultStartDate(dateMode);
+const startDate = parseDate(argValue("start-date", "")) || (dateMode === "spread" ? null : defaultStartDate(dateMode));
 const usdKrw = Number(env.ARTICLE_USD_KRW || DEFAULT_USD_KRW);
 
 if (!dryRun && !ready(env.OPENAI_API_KEY, ["sk-your"])) {
@@ -1824,11 +1826,11 @@ if (titleCatalog.warnings.length > 0) {
 console.log(`워드프레스 카테고리 ${wordpressCategories.length}개 확인 / 글마다 제목에 맞춰 자동 선택`);
 console.log("본문 전체는 화면에 출력하지 않고, 워드프레스 임시글과 outputs 폴더에만 저장함.");
 if (dateMode === "spread") {
-  console.log(`임시글 날짜: 하루 ${perDay}개 · 최소 ${minGapHours}시간 간격 · 시각 무작위 (오늘 지난 시간대는 건너뜀) — 발행을 누르면 그 시각에 예약 공개됩니다`);
+  console.log(`임시글 날짜: 하루 ${perDay}개 · 최소 ${minGapHours}시간 간격 · 시각 무작위 (${startDate ? `${dateOnly(startDate)}부터 배정` : "오늘 지난 시간대는 건너뜀"})`);
 }
 if (dateMode === "random") {
   console.log(`임시글 날짜: 최근 ${randomDays}일 안에서 무작위${fixedTime ? ` / 시각 ${fixedTime} 고정` : " (시간도 무작위)"}`);
-} else if (dateMode !== "now" && dateMode !== "none") {
+} else if (dateMode !== "spread" && dateMode !== "now" && dateMode !== "none") {
   const gap = stepDays === 0 ? "같은 날에 모두" : stepDays === 1 ? "하루씩" : `${stepDays}일씩`;
   console.log(
     `임시글 날짜: ${dateOnly(startDate)} 부터 ${gap}` +
